@@ -69,24 +69,6 @@ class AckPacket(Packet):
         return AckPacket(data.read_int())
 
 
-class NckPacket(Packet):
-    ID = 0x02
-
-    def __init__(self, confirmed_id):
-        super().__init__()
-        self.confirmed_id = confirmed_id
-
-    def as_bytes(self):
-        buf = ByteBuf()
-        buf.write_int(NckPacket.ID)
-        buf.write_int(self.confirmed_id)
-        return buf.as_bytes()
-
-    @staticmethod
-    def from_bytes(data):
-        return NckPacket(data.read_int())
-
-
 class DataPacket(Packet):
     ID = 0x03
 
@@ -127,7 +109,6 @@ class WindowPacket:
 
 
 PACKET_NAMES = {AckPacket.ID: AckPacket,
-                NckPacket.ID: NckPacket,
                 DataPacket.ID: DataPacket,
                 WindowPacket.ID: WindowPacket}
 now = time.time
@@ -167,6 +148,21 @@ class ArraySocket(Socket):
         print('Writing data', data)
 
 
+class DebugSocket(Socket):
+    def __init__(self, socket):
+        super().__init__()
+        self.socket = socket
+
+    def recv(self, bufsize=8192):
+        packet = self.socket.recv(bufsize)
+        print(self, 'recv', packet)
+        return packet
+
+    def send(self, data):
+        print(self, 'send', data)
+        return self.socket.send(data)
+
+
 class SenderSlideWindow:
     def __init__(self, size):
         self.size = size
@@ -198,18 +194,20 @@ class ReceiverSlideWindow:
         if self.read == self.confirmed:
             return None
 
+        self.read += 1
         packet = self.buf[self.read % self.size]
         self.buf[self.read % self.size] = None
-        self.read += 1
         return packet
 
     def put_packet(self, packet):
         if self.read <= packet.packet_id <= self.read + self.size:
             self.buf[packet.packet_id % self.size] = packet
 
-            for i in range(self.confirmed, self.read + self.size):
+            for i in range(self.confirmed + 1, self.read + self.size):
                 if self.buf[i % self.size]:
                     self.confirmed += 1
+                else:
+                    break
 
 
 class Protocol(Socket):
@@ -234,11 +232,11 @@ class Protocol(Socket):
             data = self.socket.recv(bufsize)
         except IOError as ex:
             if ex.errno == 11:
-                return
+                return self.try_receive()
             raise ex
 
         if not data:
-            return
+            return self.try_receive()
 
         packet = ByteBuf(data=data)
         print('packet read:', packet)
@@ -251,7 +249,6 @@ class Protocol(Socket):
         packet = packet_class.from_bytes(packet)
         print('packet type:', packet_type, str(packet_class))
 
-        result = None
         if isinstance(packet, AckPacket):
             if self.handshaking:
                 if packet.confirmed_id == self.send_window.write - 1:
@@ -261,25 +258,30 @@ class Protocol(Socket):
                     print('Handshaking error: incorrect packet id', packet.confirmed_id)
             else:
                 pass
-        elif isinstance(packet, NckPacket):
-            self.send_window.read = packet.confirmed_id
+            self.send_window.update_confirmed(packet.confirmed_id)
         elif isinstance(packet, DataPacket):
-            if self.recv_window.put_packet(packet):
-                self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
-                result = packet.data
-                # todo
-            else:
-                self.socket.send(NckPacket(self.recv_window.confirmed).as_bytes())
+            self.recv_window.put_packet(packet)
+            self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
         elif isinstance(packet, WindowPacket):
             self.recv_window = ReceiverSlideWindow(packet.window_size)
             self.recv_window.put_packet(packet)
 
             print('new window size on the other end:', packet.window_size)
             self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
-            self.send_window.put_packet(WindowPacket(self.send_window.write, self.send_window.size))
+
+            if self.handshaking:
+                self.send_window.put_packet(WindowPacket(self.send_window.write, self.send_window.size))
         self.flush()
 
-        return result
+        return self.try_receive()
+
+    def try_receive(self):
+        if self.recv_window:
+            packet = self.recv_window.get_packet()
+            if isinstance(packet, DataPacket):
+                return packet.data
+
+        return None
 
     def flush(self):
         for i in range(self.send_window.confirmed + 1, self.send_window.write):
@@ -348,24 +350,28 @@ def real_udp_connections():
     server.setblocking(False)
     server.bind(('0.0.0.0', SERVER_PORT))
     server.connect((CLIENT_IP, CLIENT_PORT))
-    server_protocol = Protocol(server, server=True)
+    server_protocol = Protocol(DebugSocket(server), server=True)
 
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client.setblocking(False)
     client.bind(('0.0.0.0', CLIENT_PORT))
     client.connect((SERVER_IP, SERVER_PORT))
-    client_protocol = Protocol(client, server=True)
+    client_protocol = Protocol(DebugSocket(client), server=True)
 
     print('Handshaking on client side')
     client_protocol.send_window.put_packet(WindowPacket(client_protocol.send_window.write, 10))
     client_protocol.flush()
 
-    server_protocol.recv()
+    print(server_protocol.recv())
 
-    client_protocol.recv()
+    print(client_protocol.recv())
+
+    print(client_protocol.recv())
+
+    print(server_protocol.recv())
 
     client_protocol.send(b'hello')
-    print(server_protocol.recv())
+
     print(server_protocol.recv())
     print(server_protocol.recv())
 
