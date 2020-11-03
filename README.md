@@ -13,10 +13,9 @@ int 0x01
 int confirmed_id
 ```
 
-NCK
+CLOSE
 ```
 int 0x02
-int confirmed_id
 ```
 
 DATA
@@ -29,7 +28,6 @@ data actual data
 WINDOW
 ```
 int 0x04
-int packet_id
 int window_size
 ```
 

@@ -81,6 +81,25 @@ class AckPacket(Packet):
         return f'AckPacket({self.confirmed_id})'
 
 
+class ClosePacket(Packet):
+    ID = 0x02
+
+    def __init__(self):
+        super().__init__()
+
+    def as_bytes(self):
+        buf = ByteBuf()
+        buf.write_int(ClosePacket.ID)
+        return buf.as_bytes()
+
+    @staticmethod
+    def from_bytes(data):
+        return ClosePacket()
+
+    def __repr__(self):
+        return 'ClosePacket()'
+
+
 class DataPacket(Packet):
     ID = 0x03
 
@@ -125,6 +144,7 @@ class WindowPacket:
 
 
 PACKET_NAMES = {AckPacket.ID: AckPacket,
+                ClosePacket.ID: ClosePacket,
                 DataPacket.ID: DataPacket,
                 WindowPacket.ID: WindowPacket}
 now = time.time
@@ -340,6 +360,8 @@ class Protocol(Socket):
         return packet
 
     def recv(self, bufsize=8192):
+        if not self.open:
+            raise ConnectionResetError('Connection reset')
         return self.handler() or b''
 
     def handshaking_handler(self):
@@ -350,6 +372,7 @@ class Protocol(Socket):
 
         packet = self._recv()
         if not packet:
+            self.flush()
             return
 
         if isinstance(packet, AckPacket):
@@ -361,8 +384,11 @@ class Protocol(Socket):
             print_info(self.name, 'recv window size on the other end:', packet.window_size)
             self._send(AckPacket(self.recv_window.confirmed))
             self._send(WindowPacket(self.recv_window.size))
+        elif isinstance(packet, ClosePacket):
+            self.open = False
         else:
             print_info(self.name, 'Unwanted packet type')
+
         self.flush()
         return None
 
@@ -536,7 +562,7 @@ def two_ends():
     client_protocol.send(b'hello, world3')
     client_protocol.send(b'hello, world4')
 
-    client_protocol.socket.drop_rate = 0.8
+    client_protocol.socket.drop_rate = 0.5
     client_protocol.flush()
 
     while print_count < 4:
