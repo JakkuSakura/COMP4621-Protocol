@@ -1,6 +1,15 @@
 import time
 import random
 import itertools
+import socket
+import threading
+
+mutex = threading.Lock()
+
+
+def print_info(*args):
+    with mutex:
+        print(*args)
 
 
 class ByteBuf:
@@ -68,6 +77,9 @@ class AckPacket(Packet):
     def from_bytes(data):
         return AckPacket(data.read_int())
 
+    def __repr__(self):
+        return f'AckPacket({self.confirmed_id})'
+
 
 class DataPacket(Packet):
     ID = 0x03
@@ -88,24 +100,28 @@ class DataPacket(Packet):
     def from_bytes(data):
         return DataPacket(data.read_int(), data.read_data())
 
+    def __repr__(self):
+        return f'DataPacket({self.packet_id})'
+
 
 class WindowPacket:
     ID = 0x04
 
-    def __init__(self, packet_id, window_size):
-        self.packet_id = packet_id
+    def __init__(self, window_size):
         self.window_size = window_size
 
     def as_bytes(self):
         buf = ByteBuf()
         buf.write_int(WindowPacket.ID)
-        buf.write_int(self.packet_id)
         buf.write_int(self.window_size)
         return buf.as_bytes()
 
     @staticmethod
     def from_bytes(data):
-        return WindowPacket(data.read_int(), data.read_int())
+        return WindowPacket(data.read_int())
+
+    def __repr__(self):
+        return f'WindowPacket({self.window_size})'
 
 
 PACKET_NAMES = {AckPacket.ID: AckPacket,
@@ -145,7 +161,7 @@ class ArraySocket(Socket):
         raise ConnectionResetError()
 
     def send(self, data):
-        print('Writing data', data)
+        print_info('Writing data', data)
 
 
 class DebugSocket(Socket):
@@ -155,11 +171,11 @@ class DebugSocket(Socket):
 
     def recv(self, bufsize=8192):
         packet = self.socket.recv(bufsize)
-        print(self, 'recv', packet)
+        print_info(self, 'recv', packet)
         return packet
 
     def send(self, data):
-        print(self, 'send', data)
+        print_info(self, 'send', data)
         return self.socket.send(data)
 
 
@@ -174,13 +190,14 @@ class DropoutSocket(Socket):
         if random.random() > self.drop_rate:
             return packet
         else:
+            print_info("Dropped received packet", packet)
             return None
 
     def send(self, data):
         if random.random() > self.drop_rate:
             return self.socket.send(data)
         else:
-            return None
+            print_info("Dropped sending packet", data)
 
 
 class DisorderSocket(Socket):
@@ -220,6 +237,7 @@ class DisorderSocket(Socket):
             return None
         else:
             packet = self.recv_buf.pop()
+            return self.socket.send(packet)
 
 
 class SenderSlideWindow:
@@ -230,13 +248,15 @@ class SenderSlideWindow:
         self.confirmed = 0
 
     def get_packet(self, index):
-        if self.confirmed <= index < self.write:
+        if self.confirmed < index <= self.write:
             packet = self.buf[index % self.size]
             return packet
 
     def put_packet(self, packet):
-        self.buf[self.write % self.size] = packet
         self.write += 1
+        packet.packet_id = self.write
+        self.buf[self.write % self.size] = packet
+        return packet
 
     def update_confirmed(self, index):
         self.confirmed = min(self.write, max(self.confirmed, index))
@@ -270,94 +290,101 @@ class ReceiverSlideWindow:
 
 
 class Protocol(Socket):
-    def __init__(self, socket: Socket, server):
+    def __init__(self, socket: Socket, server, name='Protocol'):
         super().__init__()
         self.send_window = SenderSlideWindow(10)
-        self.send_window.read = self.send_window.write = rng()
         self.recv_window = ReceiverSlideWindow(10)
         self.socket = socket
         self.open = True
         self.handler = self.handshaking_handler
-
+        self.name = name
+        self.last_ack_time = now()
+        self.handshake_timeout = 1
+        self.resend_timeout = 1
+        self.handshake_received = False
         if not server:
-            print("Handshaking initiated on client side")
-            self.send_window.put_packet(WindowPacket(self.send_window.write, self.recv_window.size))
-            self.flush()
-            self.recv()
+            print_info(self.name, "Handshaking initiated")
+            while self.handler == self.handshaking_handler:
+                self._send(WindowPacket(self.recv_window.size))
+                self.recv()
+                time.sleep(.3)
 
-    def recv(self, bufsize=8192):
-        return self.handler(bufsize)
+    def _send(self, data, buffer=False):
+        if not buffer:
+            print_info(self.name, 'sending', data)
+            self.socket.send(data.as_bytes())
+        else:
+            packet = self.send_window.put_packet(data)
+            print_info(self.name, 'buffered', packet)
 
-    def handshaking_handler(self, bufsize=8192):
+    def _recv(self):
         try:
-            data = self.socket.recv(bufsize)
+            data = self.socket.recv(8192)
         except IOError as ex:
             if ex.errno == 11:
                 return
             raise ex
+
         if not data:
             return
-
         packet = ByteBuf(data=data)
-        print('packet read:', packet)
+        # print_info(self.name, 'packet read:', packet)
         packet_type = packet.read_int()
         packet_class = PACKET_NAMES.get(packet_type)
         if not packet_class:
-            print('packet type: unknown', packet_type)
+            print_info(self.name, 'packet type: unknown', packet_type)
             return
 
         packet = packet_class.from_bytes(packet)
-        print('packet type:', packet_type, str(packet_class))
+        print_info(self.name, 'received', packet)
+        return packet
+
+    def recv(self, bufsize=8192):
+        return self.handler() or b''
+
+    def handshaking_handler(self):
+        if self.handshake_received and now() - self.last_ack_time > self.handshake_timeout:
+            print_info(self.name, 'Timeout. Retry sending handshake data')
+            self._send(AckPacket(self.recv_window.confirmed))
+            self._send(WindowPacket(self.recv_window.size))
+
+        packet = self._recv()
+        if not packet:
+            return
 
         if isinstance(packet, AckPacket):
-            if packet.confirmed_id == self.send_window.write - 1:
-                print('Handshaking done, switching to normal mode')
-                self.handler = self.normal_handler
-            else:
-                print('Handshaking error: incorrect packet id', packet.confirmed_id)
+            self.last_ack_time = now()
+            print_info(self.name, 'Handshaking done, switching to normal mode')
+            self.handler = self.normal_handler
             self.send_window.update_confirmed(packet.confirmed_id)
         elif isinstance(packet, WindowPacket):
-            self.recv_window.put_packet(packet)
-            print('recv window size on the other end:', packet.window_size)
-            self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
-            self.send_window.put_packet(WindowPacket(self.send_window.write, self.recv_window.size))
+            print_info(self.name, 'recv window size on the other end:', packet.window_size)
+            self._send(AckPacket(self.recv_window.confirmed))
+            self._send(WindowPacket(self.recv_window.size))
         else:
-            print('Unwantted packet type')
+            print_info(self.name, 'Unwanted packet type')
         self.flush()
+        return None
 
-    def normal_handler(self, bufsize=8192):
-        try:
-            data = self.socket.recv(bufsize)
-        except IOError as ex:
-            if ex.errno == 11:
-                return self.try_receive()
-            raise ex
+    def normal_handler(self):
+        if now() - self.last_ack_time > self.resend_timeout:
+            print_info(self.name, 'Timeout. Retry sending unconfirmed data')
+            self.flush()
 
-        if not data:
+        packet = self._recv()
+        if not packet:
             return self.try_receive()
-
-        packet = ByteBuf(data=data)
-        print('packet read:', packet)
-        packet_type = packet.read_int()
-        packet_class = PACKET_NAMES.get(packet_type)
-        if not packet_class:
-            print('packet type: unknown', packet_type)
-            return
-
-        packet = packet_class.from_bytes(packet)
-        print('packet type:', packet_type, str(packet_class))
 
         if isinstance(packet, AckPacket):
             self.send_window.update_confirmed(packet.confirmed_id)
         elif isinstance(packet, DataPacket):
             self.recv_window.put_packet(packet)
-            self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
+            self._send(AckPacket(self.recv_window.confirmed))
         elif isinstance(packet, WindowPacket):
-            self.recv_window.put_packet(packet)
-            print('send window size on the other end:', packet.window_size)
-            self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
+            print_info(self.name, 'recv window size on the other end:', packet.window_size)
+            self._send(AckPacket(self.recv_window.confirmed))
         else:
-            print('Unwanted packet type')
+            print_info(self.name, 'Unwanted packet type')
 
         self.flush()
         return self.try_receive()
@@ -370,26 +397,25 @@ class Protocol(Socket):
         return None
 
     def flush(self):
-        for i in range(self.send_window.confirmed + 1, self.send_window.write):
+        for i in range(self.send_window.confirmed + 1, self.send_window.write + 1):
             packet = self.send_window.get_packet(i)
-            self.socket.send(packet.as_bytes())
+            self._send(packet)
 
     def send(self, data):
         i = 0
         size = 512
         length = len(data)
         while i < length:
-            self.send_window.put_packet(DataPacket(self.send_window.write, data[i: i + size]))
+            self._send(DataPacket(0, data[i: i + size]), buffer=True)
             i += size
-        self.flush()
 
 
 def test_byte_buf():
     buf = ByteBuf()
     buf.write_int(666)
-    print(buf.read_int())
+    print_info(buf.read_int())
     buf.write_data(b'hello, world')
-    print(buf.read_data())
+    print_info(buf.read_data())
 
 
 def test_handshaking():
@@ -397,7 +423,7 @@ def test_handshaking():
     now = itertools.count(start=1, step=1)
     rng = lambda: 1
     socket = ArraySocket([
-        WindowPacket(1, 10),
+        WindowPacket(10),
         AckPacket(1)
     ])
     protocol = Protocol(socket, True)
@@ -410,57 +436,117 @@ def test_send_data():
     now = itertools.count(start=1, step=1)
     rng = lambda: 1
     socket = ArraySocket([
-        WindowPacket(1, 10),
+        WindowPacket(10),
         AckPacket(1),
         DataPacket(2, b'hello')
     ])
     protocol = Protocol(socket, True)
     while True:
         if data := protocol.recv():
-            print(data)
+            print_info(data)
+
+
+SERVER_IP = "127.0.0.1"
+SERVER_PORT = 5005
+
+CLIENT_IP = "127.0.0.1"
+CLIENT_PORT = 5006
 
 
 def real_udp_connections():
     global now, rng
     now = itertools.count(start=1, step=1)
     rng = lambda: 1
+
     import socket
-
-    SERVER_IP = "127.0.0.1"
-    SERVER_PORT = 5005
-
-    CLIENT_IP = "127.0.0.1"
-    CLIENT_PORT = 5006
 
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.setblocking(False)
     server.bind(('0.0.0.0', SERVER_PORT))
     server.connect((CLIENT_IP, CLIENT_PORT))
-    server_protocol = Protocol(DebugSocket(server), server=True)
+    server_protocol = Protocol(DebugSocket(server), server=True, name='server')
 
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client.setblocking(False)
     client.bind(('0.0.0.0', CLIENT_PORT))
     client.connect((SERVER_IP, SERVER_PORT))
-    client_protocol = Protocol(DebugSocket(client), server=True)
+    client_protocol = Protocol(DebugSocket(client), server=True, name='client')
 
-    print('Handshaking on client side')
-    client_protocol.send_window.put_packet(WindowPacket(client_protocol.send_window.write, 10))
-    client_protocol.flush()
+    print_info('Handshaking on client side')
+    client_protocol.socket.send(WindowPacket(client_protocol.recv_window.size).as_bytes())
 
-    print(server_protocol.recv())
+    print_info(server_protocol.recv())
 
-    print(client_protocol.recv())
+    print_info(client_protocol.recv())
 
-    print(client_protocol.recv())
+    print_info(client_protocol.recv())
 
-    print(server_protocol.recv())
+    print_info(server_protocol.recv())
 
     client_protocol.send(b'hello')
 
-    print(server_protocol.recv())
-    print(server_protocol.recv())
+    print_info(server_protocol.recv())
+    print_info(server_protocol.recv())
+
+
+print_count = 0
+
+endpoint_mutex = threading.Lock()
+yield_time = 0.1
+
+
+def start_server():
+    global print_count
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.setblocking(False)
+    server.bind(('0.0.0.0', SERVER_PORT))
+    server.connect((CLIENT_IP, CLIENT_PORT))
+    server_protocol = Protocol(server, server=True, name='server')
+    while True:
+        with endpoint_mutex:
+            print_info("Server round")
+            packet = server_protocol.recv()
+            if packet:
+                print_info('Server', packet)
+                print_count += 1
+        time.sleep(yield_time)
+
+
+def start_client(socket_f):
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.setblocking(False)
+    client.bind(('0.0.0.0', CLIENT_PORT))
+    client.connect((SERVER_IP, SERVER_PORT))
+    client_protocol = Protocol(socket_f(client), server=False, name='client')
+    return client_protocol
+
+
+def two_ends():
+    server = threading.Thread(target=start_server, args=())
+    server.setDaemon(True)
+    server.start()
+    client_protocol = start_client(lambda x: DropoutSocket(0.2, x))
+    for i in range(10):
+        client_protocol.recv()
+
+    client_protocol.send(b'hello, world')
+    client_protocol.send(b'hello, world')
+    client_protocol.send(b'hello, world')
+    client_protocol.send(b'hello, world')
+
+    client_protocol.socket.drop_rate = 0.8
+    client_protocol.flush()
+
+    while print_count < 4:
+        with endpoint_mutex:
+            print_info("Client round")
+            packet = client_protocol.recv()
+            if packet:
+                print_info(packet)
+        time.sleep(yield_time)
+
+    print_info('done')
 
 
 if __name__ == '__main__':
-    real_udp_connections()
+    two_ends()
