@@ -369,6 +369,7 @@ class Protocol(Socket):
     def normal_handler(self):
         if now() - self.last_ack_time > self.resend_timeout:
             print_info(self.name, 'Timeout. Retry sending unconfirmed data')
+            self._send(AckPacket(self.recv_window.confirmed))
             self.flush()
 
         packet = self._recv()
@@ -376,6 +377,7 @@ class Protocol(Socket):
             return self.try_receive()
 
         if isinstance(packet, AckPacket):
+            self.last_ack_time = now()
             self.send_window.update_confirmed(packet.confirmed_id)
         elif isinstance(packet, DataPacket):
             self.recv_window.put_packet(packet)
@@ -525,14 +527,14 @@ def two_ends():
     server = threading.Thread(target=start_server, args=())
     server.setDaemon(True)
     server.start()
-    client_protocol = start_client(lambda x: DropoutSocket(0.2, x))
+    client_protocol = start_client(lambda x: DropoutSocket(0.5, x))
     for i in range(10):
         client_protocol.recv()
 
-    client_protocol.send(b'hello, world')
-    client_protocol.send(b'hello, world')
-    client_protocol.send(b'hello, world')
-    client_protocol.send(b'hello, world')
+    client_protocol.send(b'hello, world1')
+    client_protocol.send(b'hello, world2')
+    client_protocol.send(b'hello, world3')
+    client_protocol.send(b'hello, world4')
 
     client_protocol.socket.drop_rate = 0.8
     client_protocol.flush()
