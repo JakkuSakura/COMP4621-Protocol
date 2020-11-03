@@ -163,6 +163,65 @@ class DebugSocket(Socket):
         return self.socket.send(data)
 
 
+class DropoutSocket(Socket):
+    def __init__(self, drop_rate, socket):
+        super().__init__()
+        self.socket = socket
+        self.drop_rate = drop_rate
+
+    def recv(self, bufsize=8192):
+        packet = self.socket.recv(bufsize)
+        if random.random() > self.drop_rate:
+            return packet
+        else:
+            return None
+
+    def send(self, data):
+        if random.random() > self.drop_rate:
+            return self.socket.send(data)
+        else:
+            return None
+
+
+class DisorderSocket(Socket):
+    def __init__(self, bufsize, socket):
+        super().__init__()
+        self.socket = socket
+        self.bufsize = bufsize
+        self.recv_buf = []
+        self.send_buf = []
+        self.releasing = False
+
+    def recv(self, bufsize=8192):
+        if not self.releasing:
+            packet = self.socket.recv(bufsize)
+            if packet:
+                self.recv_buf.append(packet)
+                if len(self.recv_buf) >= self.bufsize:
+                    self.releasing = True
+                    random.shuffle(self.recv_buf)
+                    return self.recv_buf.pop()
+
+            return None
+        else:
+            value = self.recv_buf.pop()
+            if len(self.recv_buf) == 0:
+                self.releasing = False
+            return value
+
+    def send(self, data):
+        if not self.releasing:
+            self.recv_buf.append(data)
+            if len(self.recv_buf) >= self.bufsize:
+                self.releasing = True
+                random.shuffle(self.recv_buf)
+                return self.recv_buf.pop()
+
+            return None
+        else:
+            packet = self.recv_buf.pop()
+
+
 class SenderSlideWindow:
     def __init__(self, size):
         self.size = size
@@ -215,19 +274,58 @@ class Protocol(Socket):
         super().__init__()
         self.send_window = SenderSlideWindow(10)
         self.send_window.read = self.send_window.write = rng()
-        self.recv_window = None
+        self.recv_window = ReceiverSlideWindow(10)
         self.socket = socket
-        self.handshaking = True
         self.open = True
+        self.handler = self.handshaking_handler
 
         if not server:
             print("Handshaking initiated on client side")
-            while self.handshaking:
-                self.send_window.put_packet(WindowPacket(self.send_window.write, 10))
-                self.flush()
-                self.recv()
+            self.send_window.put_packet(WindowPacket(self.send_window.write, self.recv_window.size))
+            self.flush()
+            self.recv()
 
     def recv(self, bufsize=8192):
+        return self.handler(bufsize)
+
+    def handshaking_handler(self, bufsize=8192):
+        try:
+            data = self.socket.recv(bufsize)
+        except IOError as ex:
+            if ex.errno == 11:
+                return
+            raise ex
+        if not data:
+            return
+
+        packet = ByteBuf(data=data)
+        print('packet read:', packet)
+        packet_type = packet.read_int()
+        packet_class = PACKET_NAMES.get(packet_type)
+        if not packet_class:
+            print('packet type: unknown', packet_type)
+            return
+
+        packet = packet_class.from_bytes(packet)
+        print('packet type:', packet_type, str(packet_class))
+
+        if isinstance(packet, AckPacket):
+            if packet.confirmed_id == self.send_window.write - 1:
+                print('Handshaking done, switching to normal mode')
+                self.handler = self.normal_handler
+            else:
+                print('Handshaking error: incorrect packet id', packet.confirmed_id)
+            self.send_window.update_confirmed(packet.confirmed_id)
+        elif isinstance(packet, WindowPacket):
+            self.recv_window.put_packet(packet)
+            print('recv window size on the other end:', packet.window_size)
+            self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
+            self.send_window.put_packet(WindowPacket(self.send_window.write, self.recv_window.size))
+        else:
+            print('Unwantted packet type')
+        self.flush()
+
+    def normal_handler(self, bufsize=8192):
         try:
             data = self.socket.recv(bufsize)
         except IOError as ex:
@@ -250,36 +348,24 @@ class Protocol(Socket):
         print('packet type:', packet_type, str(packet_class))
 
         if isinstance(packet, AckPacket):
-            if self.handshaking:
-                if packet.confirmed_id == self.send_window.write - 1:
-                    print('Handshaking done')
-                    self.handshaking = False
-                else:
-                    print('Handshaking error: incorrect packet id', packet.confirmed_id)
-            else:
-                pass
             self.send_window.update_confirmed(packet.confirmed_id)
         elif isinstance(packet, DataPacket):
             self.recv_window.put_packet(packet)
             self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
         elif isinstance(packet, WindowPacket):
-            self.recv_window = ReceiverSlideWindow(packet.window_size)
             self.recv_window.put_packet(packet)
-
-            print('new window size on the other end:', packet.window_size)
+            print('send window size on the other end:', packet.window_size)
             self.socket.send(AckPacket(self.recv_window.confirmed).as_bytes())
+        else:
+            print('Unwanted packet type')
 
-            if self.handshaking:
-                self.send_window.put_packet(WindowPacket(self.send_window.write, self.send_window.size))
         self.flush()
-
         return self.try_receive()
 
     def try_receive(self):
-        if self.recv_window:
-            packet = self.recv_window.get_packet()
-            if isinstance(packet, DataPacket):
-                return packet.data
+        packet = self.recv_window.get_packet()
+        if isinstance(packet, DataPacket):
+            return packet.data
 
         return None
 
