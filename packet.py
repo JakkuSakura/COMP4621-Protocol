@@ -1,44 +1,97 @@
-"""
-This file defines the packet format
-"""
-
+from tools import ByteBuf
 
 class Packet:
-    def __init__(self, payload=b"", seq_num=0, ack_num=0):
-        """
-        Constructor of class Packet
-        :param payload: Data carried in this packet
-        :param seq_num: Sequence number of this packet
-        :param ack_num: ACK number of this packet
-        """
-        self.seq_num = seq_num
-        self.ack_num = ack_num
-        self.payload = payload
-        self.chk_sum = 0
+    def __init__(self):
+        pass
 
-    def encode(self):
-        """
-        Encode a packet into bytes
-        :return: A byte stream
-        """
-        return b""
-
-    def decode(self, packet):
-        """
-        Decode a packet from bytes
-        :param packet: A packet in bytes
-        :return: A Packet object
-        """
-        return self
-
-    def compute_checksum(self):
-        """
-        Compute the checksum of a packet
-        :return: The checksum of this packet
-        """
-        return 0
-
-    def __str__(self):
-        return f"{self.seq_num} {self.ack_num} {self.chk_sum} \n {self.payload.decode()}"
+    def as_bytes(self):
+        pass
 
 
+class AckPacket(Packet):
+    ID = 0x01
+
+    def __init__(self, confirmed_id):
+        super().__init__()
+        self.confirmed_id = confirmed_id
+
+    def as_bytes(self):
+        buf = ByteBuf()
+        buf.write_int(AckPacket.ID)
+        buf.write_int(self.confirmed_id)
+        return buf.as_bytes()
+
+    @staticmethod
+    def from_bytes(data):
+        return AckPacket(data.read_int())
+
+    def __repr__(self):
+        return f'AckPacket({self.confirmed_id})'
+
+
+class ClosePacket(Packet):
+    ID = 0x02
+
+    def __init__(self):
+        super().__init__()
+
+    def as_bytes(self):
+        buf = ByteBuf()
+        buf.write_int(ClosePacket.ID)
+        return buf.as_bytes()
+
+    @staticmethod
+    def from_bytes(data):
+        return ClosePacket()
+
+    def __repr__(self):
+        return 'ClosePacket()'
+
+
+class DataPacket(Packet):
+    ID = 0x03
+
+    def __init__(self, packet_id, data):
+        super().__init__()
+        self.packet_id = packet_id
+        self.data = data
+
+    def as_bytes(self):
+        buf = ByteBuf()
+        buf.write_int(DataPacket.ID)
+        buf.write_int(self.packet_id)
+        buf.write_data(self.data)
+        return buf.as_bytes()
+
+    @staticmethod
+    def from_bytes(data):
+        return DataPacket(data.read_int(), data.read_data())
+
+    def __repr__(self):
+        return f'DataPacket({self.packet_id})'
+
+
+class WindowPacket:
+    ID = 0x04
+
+    def __init__(self, window_size):
+        self.window_size = window_size
+
+    def as_bytes(self):
+        buf = ByteBuf()
+        buf.write_int(WindowPacket.ID)
+        buf.write_int(self.window_size)
+        return buf.as_bytes()
+
+    @staticmethod
+    def from_bytes(data):
+        return WindowPacket(data.read_int())
+
+    def __repr__(self):
+        return f'WindowPacket({self.window_size})'
+
+
+PACKET_NAMES = {AckPacket.ID: AckPacket,
+                ClosePacket.ID: ClosePacket,
+                DataPacket.ID: DataPacket,
+                WindowPacket.ID: WindowPacket}
