@@ -1,3 +1,10 @@
+import threading
+mutex = threading.Lock()
+
+def print_info(*args):
+    with mutex:
+        print(*args)
+
 
 class ByteBuf:
     def __init__(self, size=8192, data=None):
@@ -19,7 +26,7 @@ class ByteBuf:
         l = self.read_int()
         data = self.buffer[self.read: self.read + l]
         self.read += l
-        return data
+        return bytes(data)
 
     def write_data(self, data):
         l = len(data)
@@ -28,12 +35,20 @@ class ByteBuf:
         self.write += l
 
     def as_bytes(self):
-        return self.buffer[self.read: self.write]
+        return bytes(self.buffer[self.read: self.write])
 
     def read_bytes(self):
         data = self.buffer[self.read: self.write]
         self.read = self.write
-        return data
+        return bytes(data)
+
+    def checksum(self):
+        mask = (1 << 16) - 1
+        sum = 0
+        for i in range(self.read, self.write):
+            sum = sum * 256 + self.buffer[i]
+            sum = (sum >> 16) + sum & mask
+        return sum & mask
 
     def __str__(self):
         return str(self.as_bytes())

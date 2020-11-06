@@ -4,18 +4,15 @@ import getopt
 import socket
 import sys
 
-import rdt
-
-
 def parse_args(argv):
     """
     Read command line arguments
     :param argv: Command line arguments
     """
-    global file_name    # File-to-send
-    global ip_addr    # Receiver's IP address
-    global port    # Receiver's port number
-    global payload_len    # Length of payload in each packet
+    global file_name  # File-to-send
+    global ip_addr  # Receiver's IP address
+    global port  # Receiver's port number
+    global payload_len  # Length of payload in each packet
 
     hlp_msg = 'sender.py -f <file name> -i <receiver ip address> -p <receiver port number> -p <packet payload length> '
     try:
@@ -39,21 +36,24 @@ def parse_args(argv):
 
 
 file_name = 'doc2.txt'  # File-to-send
-payload_len = 512    # Payload length
-ip_addr = 'localhost'    # Receiver's ID address
-port = 8080    # Receiver's port number
+payload_len = 512  # Payload length
+ip_addr = 'localhost'  # Receiver's ID address
+port = 8080  # Receiver's port number
+
+from protocol import Protocol
+from adaptors import *
 
 if __name__ == '__main__':
-    '''Read command line arguments'''
     parse_args(sys.argv[1:])
 
-    '''Create an UDP socket'''
-    snd_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    snd_socket.bind(('localhost', 0))
-    
-    '''Prepare the packet buffer'''
-    pkt_buffer = []
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.setblocking(False)
+    client.bind(('0.0.0.0', 0))
 
-    '''Send data to the receiver'''
-    with snd_socket:
-        rdt.send(snd_socket, (ip_addr, port))
+    client_protocol = Protocol(UdtAdaptor(client, (ip_addr, port)), server=False, name='sender')
+    with open(file_name, 'rb') as f:
+        data = f.read()
+    client_protocol.send(data)
+    client_protocol.flush()
+    client_protocol.close()
+

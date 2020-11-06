@@ -10,35 +10,6 @@ import sys
 from packet import Packet
 
 
-def recv(sock):
-    """
-    Receive data from a given socket
-    :param sock: The socket that the receiver receive data from.
-    """
-
-    global rcv_pkt_buffer
-    print('Receiver is running.')
-    ack_num = -1  # The initial value of the cumulative ACK
-    while True:
-        '''Receive data from a socket'''
-        pkt_byte, snd_addr = sock.recvfrom(1024)
-
-        '''Decode the received packet'''
-        pkt = Packet().decode(pkt_byte)
-        print('-> Receive packet', pkt.seq_num)
-
-        '''Check whether the received pkt is correct and with the desired ACK number'''
-        if (pkt.seq_num == ack_num + 1) & (pkt.chk_sum == pkt.compute_checksum()):
-            ack_num += 1  # Update the cumulative ACK number
-            f.write(pkt.payload)  # Write data to the file
-            rcv_pkt_buffer.append(pkt)  # Write data to the receiver's buffer
-
-        '''Send Ack to the sender'''
-        ack_pkt = Packet(ack_num=ack_num)
-        sock.sendto(ack_pkt.encode(), snd_addr)
-        print('<- Send ACK', ack_pkt.ack_num)
-
-
 def check():
     """
     Check whether receiver correctly receives the file
@@ -114,23 +85,34 @@ def parse_args(argv):
 
 
 file_name = 'recv.txt'    # File to write the received data
-sent_file_name = 'doc1.txt'  # File name of the sent file
+sent_file_name = 'doc2.txt'  # File name of the sent file
 payload_len = 512    # Payload length
 rcv_pkt_buffer = []    # Buffer to store the received packets
-
+from protocol import Protocol
+from adaptors import UdtAdaptor
+import time
 if __name__ == '__main__':
     '''Parse command line arguments'''
     parse_args(sys.argv[1:])
     
     ''''Open file-to-write and a UDP socket'''
-    f = open(file_name, 'wb+')
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('localhost', 8080))
-    
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(('localhost', 8080))
+    server.setblocking(False)
+
+    server_protocol = Protocol(UdtAdaptor(server, None), server=True, name='receiver')
     '''Start the receiver'''
     try:
-        with f, sock:
-            recv(sock)
+        with open(file_name, 'wb+') as f:
+            while server_protocol.open:
+                packet = server_protocol.recv()
+                if packet:
+                    packet = Packet(payload=packet)
+                    rcv_pkt_buffer.append(packet)
+                    f.write(packet.payload)
     except KeyboardInterrupt:
-        check()
-        exit(0)
+        pass
+
+
+    check()
+    exit(0)
