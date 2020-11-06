@@ -56,53 +56,64 @@ class DropoutSocket(Socket):
         if random.random() > self.drop_rate:
             return packet
         else:
-            print_info("Dropped received packet", packet)
+            print_info('Dropped received packet', packet)
             return None
 
     def send(self, data):
         if random.random() > self.drop_rate:
             return self.socket.send(data)
         else:
-            print_info("Dropped sending packet", data)
+            print_info('Dropped sending packet', data)
+
+
+class CorruptedSocket(Socket):
+    def __init__(self, drop_rate, socket):
+        super().__init__()
+        self.socket = socket
+        self.corrupt_rate = drop_rate
+
+    def recv(self, bufsize=8192):
+        packet = self.socket.recv(bufsize)
+        if random.random() > self.corrupt_rate:
+            return packet
+        else:
+            packet = bytearray(packet)
+            print_info('Messing sending packet', packet)
+            random.shuffle(packet)
+            return packet
+
+    def send(self, data):
+        if random.random() > self.corrupt_rate:
+            return self.socket.send(data)
+        else:
+            data = bytearray(data)
+            print_info('Messing sending packet', data)
+            random.shuffle(data)
+            return self.socket.send(data)
 
 
 class DisorderSocket(Socket):
-    def __init__(self, bufsize, socket):
+    def __init__(self, flush_rate, socket):
         super().__init__()
         self.socket = socket
-        self.bufsize = bufsize
+        self.flush_rate = flush_rate
         self.recv_buf = []
         self.send_buf = []
-        self.releasing = False
+        self.releasing_recv = False
 
     def recv(self, bufsize=8192):
-        if not self.releasing:
-            packet = self.socket.recv(bufsize)
-            if packet:
-                self.recv_buf.append(packet)
-                if len(self.recv_buf) >= self.bufsize:
-                    self.releasing = True
-                    random.shuffle(self.recv_buf)
-                    return self.recv_buf.pop()
-
-            return None
-        else:
-            value = self.recv_buf.pop()
-            if len(self.recv_buf) == 0:
-                self.releasing = False
-            return value
+        packet = self.socket.recv(bufsize)
+        if packet:
+            self.recv_buf.append(packet)
+        if random.random() < self.flush_rate:
+            random.shuffle(self.recv_buf)
+            return self.recv_buf.pop()
 
     def send(self, data):
-        if not self.releasing:
-            self.recv_buf.append(data)
-            if len(self.recv_buf) >= self.bufsize:
-                self.releasing = True
-                random.shuffle(self.recv_buf)
-                return self.recv_buf.pop()
-
-            return None
-        else:
-            packet = self.recv_buf.pop()
+        self.send_buf.append(data)
+        if random.random() < self.flush_rate:
+            random.shuffle(self.send_buf)
+            packet = self.send_buf.pop()
             return self.socket.send(packet)
 
 

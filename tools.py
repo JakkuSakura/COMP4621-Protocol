@@ -1,5 +1,7 @@
 import threading
+
 mutex = threading.Lock()
+
 
 def print_info(*args):
     with mutex:
@@ -52,4 +54,3 @@ class ByteBuf:
 
     def __str__(self):
         return str(self.as_bytes())
-

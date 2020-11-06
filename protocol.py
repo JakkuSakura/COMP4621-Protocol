@@ -98,6 +98,7 @@ class Protocol(Socket):
 
         packet = Packet().decode(data)
         if packet.chk_sum != packet.compute_checksum():
+            print_info(self.name, 'Checksum error, discarding', packet)
             return
 
         print_info(self.name, 'received', packet)
@@ -143,9 +144,9 @@ class Protocol(Socket):
             self._flush()
             while self.open and self.send_window.confirmed < self.send_window.write:
                 data = self._recv()
+                self.handler(data)
                 if not data:
                     break
-                self.handler(data)
 
             time.sleep(self.resend_timeout)
 
@@ -211,11 +212,11 @@ def start_client(socket_f):
 
 
 def two_ends():
-    from adaptors import DropoutSocket
+    from adaptors import DropoutSocket, CorruptedSocket, DisorderSocket
     server = threading.Thread(target=start_server, args=())
     server.setDaemon(True)
     server.start()
-    client_protocol = start_client(lambda x: DropoutSocket(0.5, x))
+    client_protocol = start_client(lambda x: DisorderSocket(0.5, x))
 
     client_protocol.send(b'hello, world1')
     client_protocol.send(b'hello, world2')
